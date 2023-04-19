@@ -71,6 +71,10 @@
 
 #define MEM_LIMIT_QEMU      200
 
+/* Default memory limit when running in Renode mode (MB): */
+
+#define MEM_LIMIT_RENODE    (8 * 1024)  /* Renode is quite big, let's be safe */
+
 /* Number of calibration cycles per every new test case (and for test
    cases that show variable behavior): */
 

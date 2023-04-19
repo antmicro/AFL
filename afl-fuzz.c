@@ -132,6 +132,7 @@ EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
            shuffle_queue,             /* Shuffle input queue?             */
            bitmap_changed = 1,        /* Time to update bitmap?           */
            qemu_mode,                 /* Running in QEMU mode?            */
+           renode_mode,               /* Running in Renode mode?          */
            skip_requested,            /* Skip request, via SIGUSR1        */
            run_over10m,               /* Run time over 10 minutes?        */
            persistent_mode,           /* Running in persistent mode?      */
@@ -3487,10 +3488,10 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
              unique_hangs, last_path_time / 1000, last_crash_time / 1000,
              last_hang_time / 1000, total_execs - last_crash_execs,
              exec_tmout, use_banner,
-             qemu_mode ? "qemu " : "", dumb_mode ? " dumb " : "",
+             qemu_mode ? "qemu " : renode_mode ? "renode " : "", dumb_mode ? " dumb " : "",
              no_forkserver ? "no_forksrv " : "", crash_mode ? "crash " : "",
              persistent_mode ? "persistent " : "", deferred_mode ? "deferred " : "",
-             (qemu_mode || dumb_mode || no_forkserver || crash_mode ||
+             (qemu_mode || renode_mode || dumb_mode || no_forkserver || crash_mode ||
               persistent_mode || deferred_mode) ? "" : "default",
              orig_cmdline, slowest_exec_ms);
              /* ignore errors */
@@ -6970,7 +6971,7 @@ EXP_ST void check_binary(u8* fname) {
 
 #endif /* ^!__APPLE__ */
 
-  if (!qemu_mode && !dumb_mode &&
+  if (!qemu_mode && !renode_mode && !dumb_mode &&
       !memmem(f_data, f_len, SHM_ENV_VAR, strlen(SHM_ENV_VAR) + 1)) {
 
     SAYF("\n" cLRD "[-] " cRST
@@ -7670,6 +7671,83 @@ EXP_ST void setup_signal_handlers(void) {
 }
 
 
+/* Rewrite argv for Renode. */
+
+static char** get_renode_argv(u8* own_loc, char** argv, int argc) {
+
+  char** new_argv;
+  u8 *tmp, *cp, *rsl, *own_copy;
+
+  int status = system("renode --version");
+  if (status == -1)
+    PFATAL("system() failed");
+
+  if (status) {
+    SAYF("\n" cLRD "[-] " cRST
+         "Failed to execute `renode --version` (%s %d).  Is it installed?  Remember to\n"
+         "    add it to your PATH.",
+         WIFEXITED(status) ? "exit status" : "killed with signal",
+         WIFEXITED(status) ? WEXITSTATUS(status) : WTERMSIG(status));
+    FATAL("Failed to locate 'renode'.");
+  }
+
+  new_argv = ck_alloc(sizeof(char*) * (argc + 3));
+  memcpy(new_argv + 2, argv + 1, sizeof(char*) * argc);
+
+  new_argv[1] = target_path;
+
+  /* Now we need to actually find the Renode binary to put in argv[0]. */
+
+  tmp = getenv("AFL_PATH");
+
+  if (tmp) {
+
+    cp = alloc_printf("%s/afl-renode-trace", tmp);
+
+    if (access(cp, X_OK))
+      FATAL("Unable to find '%s'", tmp);
+
+    target_path = new_argv[0] = cp;
+    return new_argv;
+
+  }
+
+  own_copy = ck_strdup(own_loc);
+  rsl = strrchr(own_copy, '/');
+
+  if (rsl) {
+
+    *rsl = 0;
+
+    cp = alloc_printf("%s/afl-renode-trace", own_copy);
+    ck_free(own_copy);
+
+    if (!access(cp, X_OK)) {
+
+      target_path = new_argv[0] = cp;
+      return new_argv;
+
+    }
+
+  } else ck_free(own_copy);
+
+  if (!access(BIN_PATH "/afl-renode-trace", X_OK)) {
+
+    target_path = new_argv[0] = ck_strdup(BIN_PATH "/afl-renode-trace");
+    return new_argv;
+
+  }
+
+  SAYF("\n" cLRD "[-] " cRST
+       "Oops, unable to find the 'afl-renode-trace' script.  If you\n"
+       "    already have the script installed, you may need to specify AFL_PATH in the\n"
+       "    environment.\n");
+
+  FATAL("Failed to locate 'afl-renode-trace'.");
+
+}
+
+
 /* Rewrite argv for QEMU. */
 
 static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
@@ -7795,7 +7873,7 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:b:t:T:dnCB:S:M:x:QV")) > 0)
+  while ((opt = getopt(argc, argv, "+i:o:f:m:b:t:T:dnCB:S:M:x:QRV")) > 0)
 
     switch (opt) {
 
@@ -7975,6 +8053,15 @@ int main(int argc, char** argv) {
 
         break;
 
+      case 'R': /* Renode mode */
+
+        if (renode_mode) FATAL("Multiple -R options not supported");
+        renode_mode = 1;
+
+        if (!mem_limit_given) mem_limit = MEM_LIMIT_RENODE;
+
+        break;
+
       case 'V': /* Show version number */
 
         /* Version number has been printed already, just quit. */
@@ -8000,6 +8087,7 @@ int main(int argc, char** argv) {
 
     if (crash_mode) FATAL("-C and -n are mutually exclusive");
     if (qemu_mode)  FATAL("-Q and -n are mutually exclusive");
+    if (renode_mode) FATAL("-R and -n are mutually exclusive");
 
   }
 
@@ -8064,6 +8152,8 @@ int main(int argc, char** argv) {
 
   if (qemu_mode)
     use_argv = get_qemu_argv(argv[0], argv + optind, argc - optind);
+  else if (renode_mode)
+    use_argv = get_renode_argv(argv[0], argv + optind, argc - optind);
   else
     use_argv = argv + optind;
 
